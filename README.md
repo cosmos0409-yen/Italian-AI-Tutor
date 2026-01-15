@@ -77,6 +77,26 @@ python3 Italian.py
 本程式使用 Google Gemini API，請先前往 [Google AI Studio](https://aistudio.google.com/) 申請免費的 API Key。
 首次執行程式時，在 "Settings" 分頁輸入您的 Key 即可 (會自動儲存至 `config_italian.json`)。
 
+## 🚀 操作說明 (User Guide)
+
+### 1. 初始設定 (Settings)
+*   啟動程式後，請先至 **Settings** 分頁。
+*   輸入 **Gemini API Key** (必填)。
+*   選擇您的目標語言、角色 (Persona)、等級 (Level) 與情境 (Scenario)。
+*   確認 **Microphone** 與 **Voice** 設定正確。
+*   點擊 **Save Settings** 儲存設定。
+
+### 2. 開始練習 (Practice)
+*   切換至 **Practice** 分頁。
+*   點擊 **Start (Inizia)** 按鈕開始對話。
+*   程式具備 **語音活動偵測 (VAD)** 功能，您只需自然說話，程式會自動錄音並回覆。
+*   若需結束練習，請點擊 **Stop (Ferma)**。
+
+### 3. 查看報告 (Report)
+*   練習結束後，AI 會自動生成學習分析報告 (需在設定中開啟 Generate Report)。
+*   切換至 **Report** 分頁查看內容。
+*   點擊 **Export PDF** 可將報告匯出保存。
+
 ## 📂 專案結構
 
 ```
