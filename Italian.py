@@ -41,7 +41,9 @@ DEFAULT_CONFIG = {
     "voice": "Elsa (Female)",
     "show_translation": False,
     "microphone": None,
-    "generate_report": True
+    "generate_report": True,
+    "mic_threshold": 15,
+    "stt_engine": "Gemini (AI)"
 }
 
 SCENARIOS = {
@@ -134,24 +136,54 @@ class ConfigManager:
             json.dump(config_data, f, ensure_ascii=False, indent=4)
 
 class AudioHandler:
-    def __init__(self, voice_key="Elsa (Female)", device_index=None):
+    def __init__(self, voice_key="Elsa (Female)", device_index=None, threshold=15):
         pygame.mixer.init()
         self.fs = 44100
         self.channels = 1 
         self.voice = ALL_VOICES_MAP.get(voice_key, "it-IT-ElsaNeural")
-        self.threshold = 500
+        # Lowered threshold significantly based on user feedback (AirPods on Windows often have low gain)
+        self.threshold = threshold
         self.last_speech_time = 0
         self.device_index = device_index
+
+    def set_threshold(self, threshold):
+        self.threshold = threshold
+
+    def transcribe_with_google(self, file_path, language="it-IT"):
+        r = sr.Recognizer()
+        try:
+            with sr.AudioFile(file_path) as source:
+                audio = r.record(source)
+            # Map language names to codes
+            lang_code = "it-IT" if "Italian" in language else "en-US"
+            text = r.recognize_google(audio, language=lang_code)
+            return text
+        except sr.UnknownValueError:
+            return ""
+        except sr.RequestError as e:
+            print(f"Google SR Error: {e}")
+            return ""
 
     def get_input_devices(self):
         devices = []
         seen_names = set()
+        # Keywords to exclude
+        exclude_keywords = [
+            "mapper", "對應表", "System32", "drivers", 
+            "Primary Sound Capture", "主要音效", "bthhfenum", 
+            "btha2dp"
+        ]
+        
         try:
             # Query all devices
             for i, dev in enumerate(sd.query_devices()):
                 # Check if it has input channels
                 if dev['max_input_channels'] > 0:
                     name = dev['name']
+                    # Filter out unwanted devices
+                    if any(k in name for k in exclude_keywords):
+                        continue
+                        
                     if name not in seen_names:
                         seen_names.add(name)
                         devices.append(f"{i}: {name}")
@@ -165,7 +197,7 @@ class AudioHandler:
     def set_voice(self, voice_key):
         self.voice = ALL_VOICES_MAP.get(voice_key, "it-IT-ElsaNeural")
 
-    def listen(self, gemini_client):
+    def listen(self, gemini_client, stt_engine="Gemini (AI)"):
         # Dynamic Listening with VAD (Voice Activity Detection)
         print("Listening (Smart VAD)...")
         
@@ -257,9 +289,15 @@ class AudioHandler:
             temp_wav = f"temp_input_{int(time.time())}.wav"
             wav.write(temp_wav, self.fs, full_audio)
             
-            # Send to Gemini for Transcription
-            print("Transcribing with Gemini...")
-            text = gemini_client.transcribe_audio(temp_wav)
+            # Transcribe based on engine
+            print(f"Transcribing with {stt_engine}...")
+            
+            text = ""
+            if "Google" in stt_engine:
+                 text = self.transcribe_with_google(temp_wav, gemini_client.target_language)
+            else:
+                 text = gemini_client.transcribe_audio(temp_wav)
+                 
             print(f"Transcribed: {text}")
             
             try:
@@ -291,7 +329,8 @@ class AudioHandler:
         # Split Translation if present
         italian_part = text.split("---")[0]
         
-        clean_text = italian_part.strip()
+        # Clean text for TTS (Remove *actions* and (explanations))
+        clean_text = re.sub(r'\*.*?\*|\(.*?\)', '', italian_part).strip()
         
         if not clean_text:
             return
@@ -344,11 +383,12 @@ class GeminiClient:
 
         trans_instruction = ""
         if show_translation:
-            trans_instruction = "After the response, add a separator `---` followed by a Traditional Chinese (繁體中文) translation."
+            trans_instruction = "IMPORTANT: You MUST ALWAYS end your response with a separator `---` followed by a Traditional Chinese (繁體中文) translation."
 
         self.system_instruction = (
             f"{persona_prompt} The user's {target_language} level is {level} (CEFR standards). {scenario_prompt} "
             f"Act as a native {target_language} speaker. "
+            f"Do NOT include stage directions, actions, or emotive descriptors in asterisks or parentheses (e.g. *looks happy*, (smiles)). "
             f"{trans_instruction} "
             "Keep replies concise, helping the conversation flow naturally. "
         )
@@ -376,7 +416,7 @@ class GeminiClient:
             with open(file_path, "rb") as f:
                 audio_bytes = f.read()
             
-            prompt = f"Listen to this audio and purely transcribe what is said in {self.target_language}. Do NOT translate. If it is silence or noise, return nothing."
+            prompt = f"Transcribe the spoken {self.target_language} in this audio verbatim. Do not translate. Return strictly the transcription."
             
             response = self.client.models.generate_content(
                 model=self.model_name,
@@ -461,7 +501,7 @@ class ItalianApp(ctk.CTk):
         self.geometry("1000x800")
         
         self.config = ConfigManager.load_config()
-        self.audio_handler = AudioHandler(self.config.get("voice"), self.config.get("microphone")) # Pass stored mic index
+        self.audio_handler = AudioHandler(self.config.get("voice"), self.config.get("microphone"), self.config.get("mic_threshold", 15))
         self.gemini_client = None
         self.is_running = False
         self.timer_seconds = 300 
@@ -493,62 +533,77 @@ class ItalianApp(ctk.CTk):
         frame = ctk.CTkScrollableFrame(self.tab_settings)
         frame.pack(pady=20, padx=20, fill="both", expand=True)
         
-        ctk.CTkLabel(frame, text="Gemini API Key:", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
-        self.entry_api_key = ctk.CTkEntry(frame, width=400, show="*")
-        self.entry_api_key.pack(anchor="w", padx=10, pady=(0, 10))
+        # Configure Grid
+        frame.columnconfigure(0, weight=1)
+        frame.columnconfigure(1, weight=1)
+        
+        # --- Full Width Section ---
+        ctk.CTkLabel(frame, text="Gemini API Key:", font=("Arial", 14, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10,0))
+        self.entry_api_key = ctk.CTkEntry(frame)
+        self.entry_api_key.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0,10))
         self.entry_api_key.insert(0, self.config.get("api_key", ""))
 
-        ctk.CTkLabel(frame, text="Model Name:", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
-        self.entry_model = ctk.CTkEntry(frame, width=400)
-        self.entry_model.pack(anchor="w", padx=10, pady=(0, 10))
+        ctk.CTkLabel(frame, text="Model Name:", font=("Arial", 14, "bold")).grid(row=2, column=0, columnspan=2, sticky="w", padx=10, pady=(10,0))
+        self.entry_model = ctk.CTkEntry(frame)
+        self.entry_model.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=(0,10))
         self.entry_model.insert(0, self.config.get("model_name", "gemini-2.0-flash-exp"))
 
-        # Language Selection
-        ctk.CTkLabel(frame, text="Target Language (Lingua):", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
-        self.combo_language = ctk.CTkComboBox(frame, width=400, values=["Italian", "English"], command=self.update_settings_options)
-        self.combo_language.pack(anchor="w", padx=10, pady=(0, 10))
+        # --- Left Column (Content) ---
+        # Language
+        ctk.CTkLabel(frame, text="Target Language (Lingua):", font=("Arial", 14, "bold")).grid(row=4, column=0, sticky="w", padx=10, pady=(10,0))
+        self.combo_language = ctk.CTkComboBox(frame, values=["Italian", "English"], command=self.update_settings_options)
+        self.combo_language.grid(row=5, column=0, sticky="ew", padx=10, pady=(0,10))
         self.combo_language.set(self.config.get("target_language", "Italian"))
 
-        ctk.CTkLabel(frame, text="Persona (Ruolo):", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
-        self.combo_persona = ctk.CTkComboBox(frame, width=400, values=[])
-        self.combo_persona.pack(anchor="w", padx=10, pady=(0, 10))
-        # Initial set (will be updated by update_settings_options call below)
+        # Persona
+        ctk.CTkLabel(frame, text="Persona (Ruolo):", font=("Arial", 14, "bold")).grid(row=6, column=0, sticky="w", padx=10, pady=(10,0))
+        self.combo_persona = ctk.CTkComboBox(frame, values=[])
+        self.combo_persona.grid(row=7, column=0, sticky="ew", padx=10, pady=(0,10))
         
-        ctk.CTkLabel(frame, text="Level (Level/Livello):", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
-        self.combo_level = ctk.CTkComboBox(frame, width=400)
-        self.combo_level.pack(anchor="w", padx=10, pady=(0, 10))
+        # Level
+        ctk.CTkLabel(frame, text="Level (Level/Livello):", font=("Arial", 14, "bold")).grid(row=8, column=0, sticky="w", padx=10, pady=(10,0))
+        self.combo_level = ctk.CTkComboBox(frame, values=[])
+        self.combo_level.grid(row=9, column=0, sticky="ew", padx=10, pady=(0,10))
         self.combo_level.set(self.config.get("level", "A2"))
-        
-        ctk.CTkLabel(frame, text="Scenario (Situazione):", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
-        self.option_scenario = ctk.CTkOptionMenu(frame, values=[])
-        self.option_scenario.pack(anchor="w", padx=10, pady=(0, 10))
-        
-        ctk.CTkLabel(frame, text="Voice (Voce):", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
-        self.option_voice = ctk.CTkOptionMenu(frame, values=[])
-        self.option_voice.pack(anchor="w", padx=10, pady=(0, 10))
-        
-        # Trigger update to populate values based on current language
-        self.update_settings_options(self.combo_language.get())
 
-        ctk.CTkLabel(frame, text="Teacher Avatar:", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
-        self.option_teacher_avatar = ctk.CTkOptionMenu(frame, values=self.available_icons)
-        self.option_teacher_avatar.pack(anchor="w", padx=10, pady=(0, 10))
-        self.option_teacher_avatar.set(self.config.get("teacher_avatar", "teacher_default.png"))
+        # Scenario
+        ctk.CTkLabel(frame, text="Scenario (Situazione):", font=("Arial", 14, "bold")).grid(row=10, column=0, sticky="w", padx=10, pady=(10,0))
+        self.option_scenario = ctk.CTkOptionMenu(frame, values=[])
+        self.option_scenario.grid(row=11, column=0, sticky="ew", padx=10, pady=(0,10))
         
-        ctk.CTkLabel(frame, text="User Avatar:", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
-        self.option_user_avatar = ctk.CTkOptionMenu(frame, values=self.available_icons)
-        self.option_user_avatar.pack(anchor="w", padx=10, pady=(0, 10))
-        self.option_user_avatar.set(self.config.get("user_avatar", "user_default.png"))
-        
-        ctk.CTkLabel(frame, text="Microphone (Microfono):", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
+        # Translation Toggle
+        ctk.CTkLabel(frame, text="Translation (Traduzione):", font=("Arial", 14, "bold")).grid(row=12, column=0, sticky="w", padx=10, pady=(10,0))
+        self.switch_translation = ctk.CTkSwitch(frame, text="Show Translation")
+        self.switch_translation.grid(row=13, column=0, sticky="w", padx=10, pady=(0,10))
+        if self.config.get("show_translation", False):
+            self.switch_translation.select()
+        else:
+            self.switch_translation.deselect()
+
+        # Report Toggle
+        ctk.CTkLabel(frame, text="Report (Rapporto):", font=("Arial", 14, "bold")).grid(row=14, column=0, sticky="w", padx=10, pady=(10,0))
+        self.switch_report = ctk.CTkSwitch(frame, text="Generate Session Report")
+        self.switch_report.grid(row=15, column=0, sticky="w", padx=10, pady=(0,10))
+        if self.config.get("generate_report", True):
+             self.switch_report.select()
+        else:
+             self.switch_report.deselect()
+
+        # --- Right Column (Audio & Visual) ---
+        # Voice
+        ctk.CTkLabel(frame, text="Voice (Voce):", font=("Arial", 14, "bold")).grid(row=4, column=1, sticky="w", padx=10, pady=(10,0))
+        self.option_voice = ctk.CTkOptionMenu(frame, values=[])
+        self.option_voice.grid(row=5, column=1, sticky="ew", padx=10, pady=(0,10))
+
+        # Microphone
+        ctk.CTkLabel(frame, text="Microphone (Microfono):", font=("Arial", 14, "bold")).grid(row=6, column=1, sticky="w", padx=10, pady=(10,0))
         self.option_mic = ctk.CTkOptionMenu(frame, values=[])
-        self.option_mic.pack(anchor="w", padx=10, pady=(0, 10))
-        
+        self.option_mic.grid(row=7, column=1, sticky="ew", padx=10, pady=(0,10))
+
         # Populate Mics
         mics = self.audio_handler.get_input_devices()
         self.option_mic.configure(values=mics)
-        
-        # Set current selection if valid
+        # Set selection logic...
         stored_mic = self.config.get("microphone")
         current_mic_str = None
         if stored_mic is not None:
@@ -561,23 +616,49 @@ class ItalianApp(ctk.CTk):
         elif mics:
             self.option_mic.set(mics[0])
 
-        ctk.CTkLabel(frame, text="Translation (Traduzione):", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
-        self.switch_translation = ctk.CTkSwitch(frame, text="Show Traditional Chinese Translation")
-        self.switch_translation.pack(anchor="w", padx=10, pady=(0, 10))
-        if self.config.get("show_translation", False):
-            self.switch_translation.select()
-        else:
-            self.switch_translation.deselect()
+        # Sensitivity (Menu)
+        ctk.CTkLabel(frame, text="Mic Sensitivity (Sensibilità):", font=("Arial", 14, "bold")).grid(row=8, column=1, sticky="w", padx=10, pady=(10,0))
+        # Sensitivity Map
+        self.sens_map = {
+            "Very High (Molto Alta)": 10,
+            "High (Alta)": 15,
+            "Medium (Media)": 300,
+            "Low (Bassa)": 1000,
+            "Very Low (Molta Bassa)": 2000
+        }
+        self.rev_sens_map = {v: k for k, v in self.sens_map.items()}
+        
+        self.option_sensitivity = ctk.CTkOptionMenu(frame, values=list(self.sens_map.keys()))
+        self.option_sensitivity.grid(row=9, column=1, sticky="ew", padx=10, pady=(0,10))
+        
+        curr_thresh = self.config.get("mic_threshold", 15)
+        # Find closest match
+        closest_key = min(self.sens_map.keys(), key=lambda k: abs(self.sens_map[k] - curr_thresh))
+        self.option_sensitivity.set(closest_key)
 
-        ctk.CTkLabel(frame, text="Report (Rapporto):", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
-        self.switch_report = ctk.CTkSwitch(frame, text="Generate Session Report")
-        self.switch_report.pack(anchor="w", padx=10, pady=(0, 10))
-        if self.config.get("generate_report", True):
-             self.switch_report.select()
-        else:
-             self.switch_report.deselect()
+        # STT Engine
+        ctk.CTkLabel(frame, text="STT Engine (Motore Vocale):", font=("Arial", 14, "bold")).grid(row=10, column=1, sticky="w", padx=10, pady=(10,0))
+        self.option_stt = ctk.CTkOptionMenu(frame, values=["Gemini (AI)", "Google (Standard)"])
+        self.option_stt.grid(row=11, column=1, sticky="ew", padx=10, pady=(0,10))
+        self.option_stt.set(self.config.get("stt_engine", "Gemini (AI)"))
 
-        ctk.CTkButton(frame, text="Save Settings (Salva)", command=self.save_settings).pack(pady=20)
+        # Teacher Avatar
+        ctk.CTkLabel(frame, text="Teacher Avatar:", font=("Arial", 14, "bold")).grid(row=12, column=1, sticky="w", padx=10, pady=(10,0))
+        self.option_teacher_avatar = ctk.CTkOptionMenu(frame, values=self.available_icons)
+        self.option_teacher_avatar.grid(row=13, column=1, sticky="ew", padx=10, pady=(0,10))
+        self.option_teacher_avatar.set(self.config.get("teacher_avatar", "teacher_default.png"))
+
+        # User Avatar
+        ctk.CTkLabel(frame, text="User Avatar:", font=("Arial", 14, "bold")).grid(row=14, column=1, sticky="w", padx=10, pady=(10,0))
+        self.option_user_avatar = ctk.CTkOptionMenu(frame, values=self.available_icons)
+        self.option_user_avatar.grid(row=15, column=1, sticky="ew", padx=10, pady=(0,10))
+        self.option_user_avatar.set(self.config.get("user_avatar", "user_default.png"))
+
+        # Trigger update
+        self.update_settings_options(self.combo_language.get())
+
+        ctk.CTkButton(frame, text="Save Settings (Salva)", command=self.save_settings).grid(row=16, column=0, columnspan=2, pady=20)
+
     
     def update_settings_options(self, language):
         # Update Personas
@@ -625,6 +706,10 @@ class ItalianApp(ctk.CTk):
             except:
                 pass
 
+        # Calculate Threshold from Menu
+        sens_label = self.option_sensitivity.get()
+        new_threshold = self.sens_map.get(sens_label, 15)
+
         new_config = {
             "api_key": self.entry_api_key.get().strip(),
             "model_name": self.entry_model.get().strip(),
@@ -637,12 +722,15 @@ class ItalianApp(ctk.CTk):
             "voice": self.option_voice.get(),
             "show_translation": bool(self.switch_translation.get()),
             "microphone": mic_index,
-            "generate_report": bool(self.switch_report.get())
+            "generate_report": bool(self.switch_report.get()),
+            "mic_threshold": int(new_threshold),
+            "stt_engine": self.option_stt.get()
         }
         ConfigManager.save_config(new_config)
         self.config = new_config
         self.audio_handler.set_voice(new_config["voice"])
         self.audio_handler.set_device(mic_index)
+        self.audio_handler.set_threshold(new_config["mic_threshold"])
         
         if not silent:
             # Show Saved Label
@@ -780,13 +868,14 @@ class ItalianApp(ctk.CTk):
             self.gemini_client.history.append({"role": "model", "parts": [greeting]})
         except:
             greeting = "Ciao! Cominciamo."
-        formatted_greeting = greeting.replace("---", "\n\n(Traduzione)\n")
+        formatted_greeting = greeting.replace("---", "\n\n")
         self.add_message("AI", formatted_greeting)
         asyncio.run(self.audio_handler.speak(greeting))
 
+
         while self.is_running:
             self.status_label.configure(text="Listening...", text_color="#3498DB")
-            user_text = self.audio_handler.listen(self.gemini_client)
+            user_text = self.audio_handler.listen(self.gemini_client, self.config.get("stt_engine", "Gemini (AI)"))
             if not self.is_running: break 
             if user_text:
                 bubble = self.add_message("You", user_text)
@@ -794,7 +883,7 @@ class ItalianApp(ctk.CTk):
                     threading.Thread(target=self.update_bubble_translation, args=(bubble, user_text)).start()
                 self.status_label.configure(text="Thinking...", text_color="#E67E22")
                 ai_response = self.gemini_client.send_message(user_text)
-                formatted_response = ai_response.replace("---", "\n\n(Traduzione)\n")
+                formatted_response = ai_response.replace("---", "\n\n")
                 self.add_message("AI", formatted_response)
                 self.status_label.configure(text="Speaking...", text_color="#2CC985")
                 asyncio.run(self.audio_handler.speak(ai_response))
@@ -805,7 +894,7 @@ class ItalianApp(ctk.CTk):
         if not self.gemini_client: return
         trans = self.gemini_client.translate_user_text(text)
         if trans:
-            new_text = f"{text}\n\n(Traduzione)\n{trans}"
+            new_text = f"{text}\n\n{trans}"
             self.after(0, lambda: bubble.update_text(new_text))
 
     def export_pdf(self):
