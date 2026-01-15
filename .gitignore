@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+venv/
+env/
+.env
+
+# Distribution / Packaging
+build/
+dist/
+*.spec
+
+# Application Data & Config
+config.json
+config_italian.json
+*.log
+
+# Audio / Temp
+temp/
+*.wav
+*.mp3
+temp_input.wav
+temp_voice.mp3
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
