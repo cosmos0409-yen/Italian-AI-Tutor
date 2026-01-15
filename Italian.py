@@ -39,7 +39,9 @@ DEFAULT_CONFIG = {
     "teacher_avatar": "teacher_default.png",
     "user_avatar": "user_default.png",
     "voice": "Elsa (Female)",
-    "show_translation": False
+    "show_translation": False,
+    "microphone": None,
+    "generate_report": True
 }
 
 SCENARIOS = {
@@ -94,6 +96,11 @@ PERSONAS = {
     }
 }
 
+LEVELS = {
+    "Italian": ["A1 (Principiante)", "A2 (Elementare)", "B1 (Intermedio)", "B2 (Intermedio Superiore)", "C1 (Avanzato)", "C2 (Madrelingua)"],
+    "English": ["Beginner", "Elementary", "Intermediate", "Upper Intermediate", "Advanced", "Proficiency"]
+}
+
 def get_all_voices_map():
     all_v = {}
     for lang in VOICES:
@@ -127,13 +134,33 @@ class ConfigManager:
             json.dump(config_data, f, ensure_ascii=False, indent=4)
 
 class AudioHandler:
-    def __init__(self, voice_key="Elsa (Female)"):
+    def __init__(self, voice_key="Elsa (Female)", device_index=None):
         pygame.mixer.init()
         self.fs = 44100
         self.channels = 1 
         self.voice = ALL_VOICES_MAP.get(voice_key, "it-IT-ElsaNeural")
-        self.threshold = 500  # Increased threshold to reduce sensitivity
+        self.threshold = 500
         self.last_speech_time = 0
+        self.device_index = device_index
+
+    def get_input_devices(self):
+        devices = []
+        seen_names = set()
+        try:
+            # Query all devices
+            for i, dev in enumerate(sd.query_devices()):
+                # Check if it has input channels
+                if dev['max_input_channels'] > 0:
+                    name = dev['name']
+                    if name not in seen_names:
+                        seen_names.add(name)
+                        devices.append(f"{i}: {name}")
+        except Exception as e:
+            print(f"Error listing devices: {e}")
+        return devices
+
+    def set_device(self, device_index):
+        self.device_index = device_index
 
     def set_voice(self, voice_key):
         self.voice = ALL_VOICES_MAP.get(voice_key, "it-IT-ElsaNeural")
@@ -153,8 +180,34 @@ class AudioHandler:
         start_record_time = 0
         
         try:
-            # Re-initialize stream for each listen intent to avoid buffer overflow issues on some systems
-            with sd.InputStream(samplerate=self.fs, channels=1, dtype='int16') as stream:
+            # Re-initialize stream for each listen intent
+            # Try 44100 first, fallback to 16000 for Bluetooth/AirPods
+            rates_to_try = [44100, 16000]
+            stream = None
+            
+            for rate in rates_to_try:
+                try:
+                    self.fs = rate # Update fs to match successful rate
+                    stream = sd.InputStream(
+                        samplerate=self.fs, 
+                        channels=1, 
+                        dtype='int16', 
+                        device=self.device_index
+                    )
+                    stream.start()
+                    print(f"Stream started with rate {rate}Hz on device {self.device_index}")
+                    break
+                except Exception as e:
+                    print(f"Failed to start stream at {rate}Hz: {e}")
+                    if stream:
+                        stream.close()
+                    stream = None
+            
+            if not stream:
+                print("Could not open audio stream on any rate.")
+                return None
+
+            with stream:
                 start_listening = time.time()
                 while True:
                     chunk, overflow = stream.read(int(self.fs * 0.1)) # 100ms
@@ -249,7 +302,12 @@ class AudioHandler:
             communicate = edge_tts.Communicate(clean_text, self.voice)
             await communicate.save(output_file)
             
+            # Ensure mixer is initialized
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+            
             pygame.mixer.music.load(output_file)
+            pygame.mixer.music.set_volume(1.0) # Ensure volume is up
             pygame.mixer.music.play()
             while pygame.mixer.music.get_busy():
                 pygame.time.Clock().tick(10)
@@ -403,7 +461,7 @@ class ItalianApp(ctk.CTk):
         self.geometry("1000x800")
         
         self.config = ConfigManager.load_config()
-        self.audio_handler = AudioHandler(self.config.get("voice"))
+        self.audio_handler = AudioHandler(self.config.get("voice"), self.config.get("microphone")) # Pass stored mic index
         self.gemini_client = None
         self.is_running = False
         self.timer_seconds = 300 
@@ -457,9 +515,9 @@ class ItalianApp(ctk.CTk):
         # Initial set (will be updated by update_settings_options call below)
         
         ctk.CTkLabel(frame, text="Level (Level/Livello):", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
-        self.entry_level = ctk.CTkEntry(frame, width=400)
-        self.entry_level.pack(anchor="w", padx=10, pady=(0, 10))
-        self.entry_level.insert(0, self.config.get("level", "A2"))
+        self.combo_level = ctk.CTkComboBox(frame, width=400)
+        self.combo_level.pack(anchor="w", padx=10, pady=(0, 10))
+        self.combo_level.set(self.config.get("level", "A2"))
         
         ctk.CTkLabel(frame, text="Scenario (Situazione):", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
         self.option_scenario = ctk.CTkOptionMenu(frame, values=[])
@@ -482,6 +540,27 @@ class ItalianApp(ctk.CTk):
         self.option_user_avatar.pack(anchor="w", padx=10, pady=(0, 10))
         self.option_user_avatar.set(self.config.get("user_avatar", "user_default.png"))
         
+        ctk.CTkLabel(frame, text="Microphone (Microfono):", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
+        self.option_mic = ctk.CTkOptionMenu(frame, values=[])
+        self.option_mic.pack(anchor="w", padx=10, pady=(0, 10))
+        
+        # Populate Mics
+        mics = self.audio_handler.get_input_devices()
+        self.option_mic.configure(values=mics)
+        
+        # Set current selection if valid
+        stored_mic = self.config.get("microphone")
+        current_mic_str = None
+        if stored_mic is not None:
+             for m in mics:
+                 if m.startswith(f"{stored_mic}:"):
+                     current_mic_str = m
+                     break
+        if current_mic_str:
+            self.option_mic.set(current_mic_str)
+        elif mics:
+            self.option_mic.set(mics[0])
+
         ctk.CTkLabel(frame, text="Translation (Traduzione):", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
         self.switch_translation = ctk.CTkSwitch(frame, text="Show Traditional Chinese Translation")
         self.switch_translation.pack(anchor="w", padx=10, pady=(0, 10))
@@ -489,6 +568,14 @@ class ItalianApp(ctk.CTk):
             self.switch_translation.select()
         else:
             self.switch_translation.deselect()
+
+        ctk.CTkLabel(frame, text="Report (Rapporto):", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
+        self.switch_report = ctk.CTkSwitch(frame, text="Generate Session Report")
+        self.switch_report.pack(anchor="w", padx=10, pady=(0, 10))
+        if self.config.get("generate_report", True):
+             self.switch_report.select()
+        else:
+             self.switch_report.deselect()
 
         ctk.CTkButton(frame, text="Save Settings (Salva)", command=self.save_settings).pack(pady=20)
     
@@ -509,6 +596,16 @@ class ItalianApp(ctk.CTk):
         elif scenarios:
             self.option_scenario.set(scenarios[0])
             
+        # Update Levels
+        levels = LEVELS.get(language, [])
+        self.combo_level.configure(values=levels)
+        current_level = self.config.get("level")
+        # Check if current level is valid for the new language, otherwise reset
+        if current_level in levels:
+             self.combo_level.set(current_level)
+        elif levels:
+             self.combo_level.set(levels[0])
+
         # Update Voices
         voices = list(VOICES.get(language, {}).keys())
         self.option_voice.configure(values=voices)
@@ -517,32 +614,46 @@ class ItalianApp(ctk.CTk):
         elif voices:
             self.option_voice.set(voices[0])
 
-    def save_settings(self):
+
+    def save_settings(self, silent=False):
+        # Parse Mic Index
+        mic_selection = self.option_mic.get()
+        mic_index = None
+        if mic_selection and ":" in mic_selection:
+            try:
+                mic_index = int(mic_selection.split(":")[0])
+            except:
+                pass
+
         new_config = {
             "api_key": self.entry_api_key.get().strip(),
             "model_name": self.entry_model.get().strip(),
             "target_language": self.combo_language.get(),
             "persona": self.combo_persona.get().strip(),
-            "level": self.entry_level.get().strip(),
+            "level": self.combo_level.get().strip(),
             "scenario": self.option_scenario.get(),
             "teacher_avatar": self.option_teacher_avatar.get(),
             "user_avatar": self.option_user_avatar.get(),
             "voice": self.option_voice.get(),
-            "show_translation": bool(self.switch_translation.get())
+            "show_translation": bool(self.switch_translation.get()),
+            "microphone": mic_index,
+            "generate_report": bool(self.switch_report.get())
         }
         ConfigManager.save_config(new_config)
         self.config = new_config
         self.audio_handler.set_voice(new_config["voice"])
+        self.audio_handler.set_device(mic_index)
         
-        # Show Saved Label
-        if self.saved_label:
-            self.saved_label.destroy()
-        
-        self.saved_label = ctk.CTkLabel(self.tab_settings, text="Settings Saved!", text_color="#2ECC71", font=("Arial", 16, "bold"))
-        self.saved_label.place(relx=0.5, rely=0.9, anchor="center")
-        
-        # Hide after 3 seconds
-        self.after(3000, self.remove_saved_label)
+        if not silent:
+            # Show Saved Label
+            if self.saved_label:
+                self.saved_label.destroy()
+            
+            self.saved_label = ctk.CTkLabel(self.tab_settings, text="Settings Saved!", text_color="#2ECC71", font=("Arial", 16, "bold"))
+            self.saved_label.place(relx=0.5, rely=0.9, anchor="center")
+            
+            # Hide after 3 seconds
+            self.after(3000, self.remove_saved_label)
 
     def remove_saved_label(self):
         if self.saved_label:
@@ -581,22 +692,6 @@ class ItalianApp(ctk.CTk):
         self.btn_export = ctk.CTkButton(self.report_frame, text="Export PDF", command=self.export_pdf, fg_color="#2980B9")
         self.btn_export.pack(side="bottom", pady=10)
 
-    def save_settings(self):
-        new_config = {
-            "api_key": self.entry_api_key.get().strip(),
-            "model_name": self.entry_model.get().strip(),
-            "persona": self.combo_persona.get().strip(),
-            "level": self.entry_level.get().strip(),
-            "scenario": self.option_scenario.get(),
-            "teacher_avatar": self.option_teacher_avatar.get(),
-            "user_avatar": self.option_user_avatar.get(),
-            "voice": self.option_voice.get(),
-            "show_translation": bool(self.switch_translation.get())
-        }
-        ConfigManager.save_config(new_config)
-        self.config = new_config
-        self.audio_handler.set_voice(new_config["voice"])
-        ctk.CTkLabel(self.tab_settings, text="Settings Saved!", text_color="#2ECC71").place(relx=0.5, rely=0.9, anchor="center")
 
     def add_message(self, sender, text):
         avatar_file = self.config.get("teacher_avatar") if sender == "AI" else self.config.get("user_avatar")
@@ -622,6 +717,9 @@ class ItalianApp(ctk.CTk):
         self.after(1000, self.update_timer_ui)
 
     def start_practice(self):
+        # Auto-save settings to ensure UI matches config
+        self.save_settings(silent=True)
+
         if not self.config.get("api_key"):
             self.status_label.configure(text="Error: Missing API Key", text_color="red")
             return
@@ -664,14 +762,16 @@ class ItalianApp(ctk.CTk):
         threading.Thread(target=self.finalize_session).start()
 
     def finalize_session(self):
-        if self.gemini_client:
+        if self.gemini_client and self.config.get("generate_report", True):
             report = self.gemini_client.generate_report()
             self.report_display.configure(state="normal")
             self.report_display.delete("1.0", "end")
             self.report_display.insert("end", report)
             self.report_display.configure(state="disabled")
             self.tab_view.set("Report (Rapporto)")
-        self.status_label.configure(text="Session Ended", text_color="gray")
+            self.status_label.configure(text="Session Ended", text_color="gray")
+        else:
+            self.status_label.configure(text="Session Ended (No Report)", text_color="gray")
 
     def audio_loop(self):
         try:
