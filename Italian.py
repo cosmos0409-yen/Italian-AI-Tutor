@@ -542,7 +542,17 @@ class ItalianApp(ctk.CTk):
         self.saved_label.place(relx=0.5, rely=0.9, anchor="center")
         
         # Hide after 3 seconds
-        self.after(3000, lambda: self.saved_label.destroy() if self.saved_label else None)
+        self.after(3000, self.remove_saved_label)
+
+    def remove_saved_label(self):
+        if self.saved_label:
+            try:
+                self.saved_label.destroy()
+            except:
+                pass
+            self.saved_label = None
+
+    def setup_practice_tab(self):
         self.chat_frame = ctk.CTkScrollableFrame(self.tab_practice)
         self.chat_frame.pack(fill="both", expand=True, padx=10, pady=10)
         
@@ -663,8 +673,6 @@ class ItalianApp(ctk.CTk):
             self.tab_view.set("Report (Rapporto)")
         self.status_label.configure(text="Session Ended", text_color="gray")
 
-    def audio_loop(self):
-        try:
     def audio_loop(self):
         try:
             intro_response = self.gemini_client.chat.send_message(f"Start the conversation now in {self.gemini_client.target_language}. Briefly greet me.")

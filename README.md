@@ -18,27 +18,64 @@
 *   **雙語翻譯**: 可隨時切換顯示繁體中文翻譯。
 
 ## 🛠️ 安裝與執行 (Installation)
-
 ### 1. 環境需求
 *   Python 3.10 或更高版本。
-*   建議使用虛擬環境 (Virtual Environment)。
+*   (macOS) 需要安裝 PortAudio。
 
-### 2. 安裝依賴套件
-下載專案後，在終端機執行：
+### 2. 安裝步驟 (Windows)
+1.  **安裝 Python**: 前往 [python.org](https://www.python.org/) 下載並安裝。
+2.  **開啟終端機 (CMD/PowerShell)**，進入專案資料夾。
+3.  **安裝套件**:
+    ```bash
+    pip install -r requirements.txt
+    ```
+4.  **執行程式**:
+    ```bash
+    python Italian.py
+    ```
 
+### 3. 安裝步驟 (macOS) - 詳細教學
+macOS 使用者建議使用 Homebrew 來管理環境，以確保音訊套件 `PortAudio` 能正常運作。
+
+#### Step A: 安裝 Homebrew (如果尚未安裝)
+打開 Terminal (終端機)，貼上以下指令並按 Enter：
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+#### Step B: 安裝 Python 與 PortAudio
+此程式需要 `portaudio` 支援錄音功能 (PyAudio/SoundDevice 依賴此套件)。
+```bash
+brew install python
+brew install portaudio
+```
+
+#### Step C: 建立虛擬環境 (建議)
+為了避免套件衝突，建議建立專屬的虛擬環境：
+```bash
+# 進入本專案資料夾 (假設您下載到了 Downloads)
+cd ~/Downloads/Italian-AI-Tutor
+
+# 建立環境
+python3 -m venv venv
+
+# 啟動環境
+source venv/bin/activate
+```
+
+#### Step D: 安裝依賴套件
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. 設定 API Key
+#### Step E: 執行程式
+```bash
+python3 Italian.py
+```
+
+### 4. 設定 API Key
 本程式使用 Google Gemini API，請先前往 [Google AI Studio](https://aistudio.google.com/) 申請免費的 API Key。
 首次執行程式時，在 "Settings" 分頁輸入您的 Key 即可 (會自動儲存至 `config_italian.json`)。
-
-### 4. 啟動程式
-
-```bash
-python Italian.py
-```
 
 ## 📂 專案結構
 
